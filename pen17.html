@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>音乐喷泉 · 歌单版</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+        body {
+            width: 100vw; height: 100vh; background: #000; overflow: hidden;
+            font-family: system-ui, sans-serif; position: relative;
+        }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: block; }
+        
+        .controls {
+            position: absolute; bottom: 30px; left: 0; right: 0;
+            display: flex; justify-content: center; gap: 12px;
+            z-index: 20; pointer-events: none; flex-wrap: wrap;
+            align-items: center;
+        }
+        
+        select {
+            pointer-events: auto;
+            padding: 12px 36px 12px 20px;
+            border-radius: 25px;
+            border: none;
+            color: white;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: rgba(255,140,0,0.9);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='white' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 15px center;
+            outline: none;
+        }
+        select:hover { transform: translateY(-2px); background: rgba(255,160,0,1); }
+        select option { background: #333; color: white; padding: 10px; }
+        select option:disabled { color: #888; background: #222; }
+        select option:first-child { color: #aaa; }
+        
+        button {
+            pointer-events: auto; padding: 12px 24px; border-radius: 25px;
+            border: none; color: white; font-size: 14px; font-weight: 600;
+            cursor: pointer; transition: all 0.3s;
+            background: rgba(255,140,0,0.9);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+        button:hover { transform: translateY(-2px); }
+        #playBtn {
+            background: linear-gradient(45deg, #ff0066, #ff6600);
+            font-size: 16px; padding: 14px 32px;
+        }
+        #playBtn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; filter: grayscale(0.5); }
+        
+        .status {
+            position: absolute; top: 30px; left: 50%; transform: translateX(-50%);
+            color: white; background: rgba(0,0,0,0.7); padding: 10px 20px;
+            border-radius: 20px; font-size: 14px; z-index: 30;
+            display: none; text-align: center;
+        }
+        .status.show { display: block; }
+        .status.error { color: #ff9999; background: rgba(80,0,0,0.8); }
+        
+        .now-playing {
+            position: absolute; top: 80px; left: 50%; transform: translateX(-50%);
+            color: #ffcc00; font-size: 16px; font-weight: 600;
+            text-shadow: 0 2px 10px rgba(255,200,0,0.5);
+            opacity: 0; transition: opacity 0.3s;
+            z-index: 25; pointer-events: none;
+        }
+        .now-playing.show { opacity: 1; }
+    </style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+<div class="status" id="status"></div>
+<div class="now-playing" id="nowPlaying"></div>
+
+<div class="controls">
+    <select id="songSelect">
+        <option value="" disabled selected>🎵 选择在线歌曲</option>
+    </select>
+    <button id="playBtn" disabled>▶ 播放</button>
+    <button id="fileBtn">🎵 本地音乐</button>
+</div>
+
+<!-- 修复：明确指定多种音频格式，避免手机浏览器兼容性问题 -->
+<input type="file" id="fileInput" accept="audio/mp3,audio/mpeg,audio/wav,audio/x-m4a,audio/aac,.mp3,.m4a,.wav,.aac" style="display:none">
+
+<script>
+    const PLAYLIST = [
+        { id: "song1", name: "爱我中华", url: "https://changx171.github.io/pq/aiwozhonghua.mp3" },
+    ];
+    
+    const SLOTS = 10;
+    const MAX_HEIGHT = 280;
+    const LAYERS = [0.6, 0.7, 0.8, 0.9, 1.0, 0.5, 0.6, 0.7, 0.8, 0.9];
+    const MIST_POOL = 80;
+    
+    let audioCtx, analyser, dataArray;
+    let audioEl = null;
+    let isPlaying = false;
+    let currentSongUrl = null;
+    let currentSongName = null;
+    let isLocalFile = false;
+    
+    let canvas = document.getElementById('canvas');
+    let ctx = canvas.getContext('2d');
+    let W, H, time = 0;
+    let stars = [], buildings = [], heights = [], targets = [];
+    let mistParticles = [];
+    let globalHueShift = 0;
+
+    function init() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+        
+        initPlaylist();
+        
+        stars = [];
+        for(let i=0; i<200; i++) {
+            stars.push({
+                x: Math.random()*W, y: Math.random()*H*0.6,
+                size: Math.random()*1.5, blink: Math.random()*Math.PI,
+                speed: 0.02+Math.random()*0.03, hue: Math.random()*60 + 180
+            });
+        }
+        
+        buildings = [];
+        let x = 0;
+        while(x < W) {
+            let w = 20 + Math.random()*40;
+            buildings.push({x, w, h: 30 + Math.random()*80});
+            x += w + 5;
+        }
+        
+        mistParticles = [];
+        for(let i=0; i<MIST_POOL; i++) {
+            mistParticles.push({x:0, y:0, vx:0, vy:0, life:0, size:0, active:false, hue:0});
+        }
+        
+        heights = new Array(SLOTS).fill(0);
+        targets = new Array(SLOTS).fill(0);
+        
+        animate();
+    }
+    
+    function initPlaylist() {
+        const select = document.getElementById('songSelect');
+        PLAYLIST.forEach((song) => {
+            const option = document.createElement('option');
+            option.value = song.url;
+            option.textContent = song.name;
+            option.dataset.name = song.name;
+            select.appendChild(option);
+        });
+        
+        select.addEventListener('change', (e) => {
+            const selectedOption = e.target.options[e.target.selectedIndex];
+            currentSongUrl = e.target.value;
+            currentSongName = selectedOption.dataset.name;
+            
+            document.getElementById('playBtn').disabled = false;
+            
+            if(isPlaying && !isLocalFile) {
+                stopPlay();
+                togglePlay();
+            } else {
+                showNowPlaying(currentSongName);
+            }
+        });
+    }
+
+    function showStatus(msg, isError=false) {
+        const s = document.getElementById('status');
+        s.textContent = msg;
+        s.className = 'status show' + (isError ? ' error' : '');
+        if(!isError) setTimeout(() => s.classList.remove('show'), 3000);
+    }
+    
+    function showNowPlaying(name) {
+        const np = document.getElementById('nowPlaying');
+        np.textContent = '♪ ' + name;
+        np.classList.add('show');
+    }
+    
+    function hideNowPlaying() {
+        document.getElementById('nowPlaying').classList.remove('show');
+    }
+
+    function stopPlay() {
+        if(audioEl) {
+            audioEl.pause();
+            audioEl.src = '';
+        }
+        isPlaying = false;
+        isLocalFile = false;
+        document.getElementById('playBtn').textContent = '▶ 播放';
+    }
+    
+    async function togglePlay() {
+        const btn = document.getElementById('playBtn');
+        
+        if(isPlaying) {
+            if(audioEl) audioEl.pause();
+            isPlaying = false;
+            btn.textContent = '▶ 播放';
+            return;
+        }
+        
+        if(!currentSongUrl) {
+            showStatus('请先选择一首歌曲', true);
+            return;
+        }
+        
+        btn.disabled = true;
+        btn.textContent = '加载中...';
+        
+        try {
+            if(!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            
+            if(audioCtx.state === 'suspended') {
+                await audioCtx.resume();
+            }
+            
+            if(!audioEl || audioEl.src !== currentSongUrl) {
+                audioEl = new Audio();
+                audioEl.crossOrigin = 'anonymous';
+                audioEl.src = currentSongUrl;
+                audioEl.loop = true;
+                audioEl.preload = 'auto';
+                
+                await new Promise((resolve, reject) => {
+                    audioEl.oncanplay = resolve;
+                    audioEl.onerror = (e) => reject(new Error('音频加载失败'));
+                    setTimeout(() => reject(new Error('加载超时')), 10000);
+                    audioEl.load();
+                });
+                
+                if(!analyser) {
+                    analyser = audioCtx.createAnalyser();
+                    analyser.fftSize = 512;
+                    analyser.smoothingTimeConstant = 0.8;
+                    dataArray = new Uint8Array(analyser.frequencyBinCount);
+                    
+                    const source = audioCtx.createMediaElementSource(audioEl);
+                    source.connect(analyser);
+                    analyser.connect(audioCtx.destination);
+                }
+            }
+            
+            try {
+                await audioEl.play();
+                isPlaying = true;
+                isLocalFile = false;
+                btn.textContent = '⏸ 暂停';
+                showNowPlaying(currentSongName);
+                showStatus('正在播放：' + currentSongName);
+            } catch(playErr) {
+                if(playErr.name === 'NotAllowedError') {
+                    showStatus('请点击按钮开始播放', true);
+                    btn.textContent = '▶ 播放';
+                } else {
+                    throw playErr;
+                }
+            }
+            
+        } catch(e) {
+            console.error(e);
+            showStatus('播放失败：' + e.message, true);
+            btn.textContent = '▶ 重试';
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    document.getElementById('fileBtn').addEventListener('click', () => {
+        document.getElementById('fileInput').click();
+    });
+    
+    document.getElementById('fileInput').addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if(!file) return;
+        
+        // 简单的音频文件类型检查
+        const validTypes = ['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/mp4', 'audio/x-m4a', 'audio/aac', 'audio/ogg'];
+        const validExts = ['.mp3', '.wav', '.m4a', '.aac', '.ogg'];
+        const fileExt = '.' + file.name.split('.').pop().toLowerCase();
+        
+        if(!validTypes.includes(file.type) && !validExts.includes(fileExt)) {
+            showStatus('请选择有效的音频文件 (MP3/WAV/M4A)', true);
+            return;
+        }
+        
+        const btn = document.getElementById('playBtn');
+        
+        stopPlay();
+        
+        const select = document.getElementById('songSelect');
+        select.value = "";
+        
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+            const dataUrl = e.target.result;
+            
+            audioEl = new Audio(dataUrl);
+            audioEl.loop = true;
+            
+            if(!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            
+            try {
+                if(analyser) {
+                    analyser.disconnect();
+                    analyser = null;
+                }
+                
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 512;
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+                
+                const source = audioCtx.createMediaElementSource(audioEl);
+                source.connect(analyser);
+                analyser.connect(audioCtx.destination);
+                
+                await audioEl.play();
+                isPlaying = true;
+                isLocalFile = true;
+                btn.textContent = '⏸ 暂停';
+                btn.disabled = false;
+                const fileName = file.name.split('.')[0];
+                showNowPlaying(fileName);
+                showStatus('播放本地文件：' + fileName);
+            } catch(err) {
+                showStatus('播放失败', true);
+            }
+        };
+        reader.onerror = () => {
+            showStatus('文件读取失败', true);
+        };
+        reader.readAsDataURL(file);
+    });
+
+    document.getElementById('playBtn').addEventListener('click', togglePlay);
+
+    function draw() {
+        let grad = ctx.createLinearGradient(0,0,0,H);
+        grad.addColorStop(0, '#02040a');
+        grad.addColorStop(0.5, '#0a1428');
+        grad.addColorStop(1, '#0d1e3a');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0,0,W,H);
+        
+        stars.forEach(s => {
+            let alpha = 0.3 + Math.sin(time*s.speed + s.blink)*0.3;
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = `hsl(${s.hue + globalHueShift}, 80%, 80%)`;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, s.size, 0, Math.PI*2);
+            ctx.fill();
+        });
+        ctx.globalAlpha = 1;
+        
+        ctx.fillStyle = '#051020';
+        buildings.forEach(b => {
+            ctx.fillRect(b.x, H*0.65 - b.h, b.w, b.h);
+        });
+        
+        let waterY = H*0.68;
+        ctx.fillStyle = 'rgba(0,20,50,0.8)';
+        ctx.fillRect(0, waterY, W, H-waterY);
+        
+        drawFountainLayer(waterY, true);
+        drawFountainLayer(waterY, false);
+        drawMist(waterY);
+        drawReflection(waterY);
+    }
+
+    function drawFountainLayer(waterY, isBack) {
+        let startIdx = isBack ? 5 : 0;
+        let endIdx = isBack ? 10 : 5;
+        let slotW = W / 6;
+        
+        for(let i=startIdx; i<endIdx; i++) {
+            let idx = isBack ? i-5 : i;
+            let centerX = slotW * (idx + 1) + (isBack ? slotW*0.5 : 0);
+            let layerMul = LAYERS[i];
+            let rawH = heights[i] * MAX_HEIGHT / 255 * layerMul;
+            let h = Math.min(MAX_HEIGHT * layerMul, rawH);
+            
+            if(h < 5) continue;
+            
+            let intensity = heights[i] / 255;
+            let baseHue = (i * 36 + globalHueShift) % 360;
+            if(isBack) baseHue += 20;
+            
+            let heightOffset = intensity * 40;
+            let hue = (baseHue + heightOffset) % 360;
+            let sat = 70 + intensity * 30;
+            let light = 40 + intensity * 40;
+            
+            let grad = ctx.createLinearGradient(centerX, waterY, centerX, waterY-h);
+            grad.addColorStop(0, `hsla(${hue},${sat}%,${light}%,0.9)`);
+            grad.addColorStop(0.4, `hsla(${hue + 20},${sat}%,${light+10}%,0.7)`);
+            grad.addColorStop(0.8, `hsla(${hue + 40},${sat-20}%,${light+30}%,0.4)`);
+            grad.addColorStop(1, `hsla(${hue + 60},${sat-40}%,${light+50}%,0.1)`);
+            
+            let baseW = isBack ? 6 : 8;
+            let topW = baseW * 0.3;
+            
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.moveTo(centerX-baseW, waterY);
+            ctx.lineTo(centerX+baseW, waterY);
+            ctx.lineTo(centerX+topW, waterY-h);
+            ctx.lineTo(centerX-topW, waterY-h);
+            ctx.closePath();
+            ctx.fill();
+            
+            ctx.fillStyle = `hsla(${hue},80%,95%,${0.4+intensity*0.4})`;
+            ctx.fillRect(centerX-baseW*0.3, waterY-h, baseW*0.6, h);
+            
+            let glow = ctx.createRadialGradient(centerX, waterY, 0, centerX, waterY, baseW*4);
+            glow.addColorStop(0, `hsla(${hue},90%,60%,${0.7*intensity})`);
+            glow.addColorStop(0.5, `hsla(${hue+30},80%,50%,${0.3*intensity})`);
+            glow.addColorStop(1, 'transparent');
+            ctx.fillStyle = glow;
+            ctx.fillRect(centerX-baseW*4, waterY-baseW*4, baseW*8, baseW*8);
+            
+            if(heights[i] > 120) {
+                ctx.fillStyle = `hsla(${hue + Math.random()*40},90%,85%,${intensity})`;
+                for(let j=0; j<8; j++) {
+                    let angle = -Math.PI/2 + (j-3.5)*0.3;
+                    let r = 3 + Math.random()*5;
+                    ctx.beginPath();
+                    ctx.arc(centerX + Math.cos(angle)*r, waterY-h + Math.sin(angle)*r*0.5, 1.5, 0, Math.PI*2);
+                    ctx.fill();
+                }
+            }
+            
+            if(heights[i] > 80 && Math.random() < 0.1) {
+                for(let p of mistParticles) {
+                    if(!p.active) {
+                        p.x = centerX + (Math.random()-0.5)*20;
+                        p.y = waterY-h*0.7;
+                        p.vx = (Math.random()-0.5)*0.5;
+                        p.vy = -Math.random()*0.5;
+                        p.life = 1; 
+                        p.size = 10+Math.random()*20;
+                        p.hue = hue; 
+                        p.active = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    function drawMist(waterY) {
+        ctx.globalCompositeOperation = 'screen';
+        for(let p of mistParticles) {
+            if(!p.active) continue;
+            p.x += p.vx; 
+            p.y += p.vy;
+            p.life -= 0.015; 
+            p.size *= 1.02;
+            if(p.life <= 0) { 
+                p.active = false; 
+                continue; 
+            }
+            ctx.fillStyle = `hsla(${p.hue},60%,80%,${p.life*0.1})`;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+            ctx.fill();
+        }
+        ctx.globalCompositeOperation = 'source-over';
+    }
+
+    function drawReflection(waterY) {
+        ctx.save();
+        ctx.globalAlpha = 0.2;
+        ctx.scale(1, -0.3);
+        ctx.translate(0, -waterY*3.3);
+        ctx.filter = 'blur(4px)';
+        let slotW = W/6;
+        for(let i=0; i<SLOTS; i++) {
+            let isBack = i>=5, idx = isBack ? i-5 : i;
+            let centerX = slotW*(idx+1) + (isBack?slotW*0.5:0);
+            let h = heights[i]*MAX_HEIGHT/255*LAYERS[i];
+            if(h<5) continue;
+            let baseHue = (i * 36 + globalHueShift) % 360;
+            ctx.fillStyle = `hsla(${baseHue},70%,60%,0.3)`;
+            ctx.fillRect(centerX-3, waterY-h, 6, h);
+        }
+        ctx.restore();
+    }
+
+    function animate() {
+        time = Date.now();
+        globalHueShift += 0.2;
+        
+        if(isPlaying && analyser && dataArray) {
+            analyser.getByteFrequencyData(dataArray);
+            let len = dataArray.length || 1;
+            
+            for(let i=0; i<SLOTS; i++) {
+                let symmetricIdx = i < 5 ? i : 9-i;
+                let startRatio, endRatio;
+                if(symmetricIdx === 0) { startRatio = 0.50; endRatio = 0.90; }
+                else if(symmetricIdx === 1) { startRatio = 0.30; endRatio = 0.50; }
+                else if(symmetricIdx === 2) { startRatio = 0.10; endRatio = 0.30; }
+                else if(symmetricIdx === 3) { startRatio = 0.05; endRatio = 0.10; }
+                else { startRatio = 0.00; endRatio = 0.05; }
+                
+                let start = Math.min(Math.floor(startRatio * len), len-1);
+                let end = Math.min(Math.floor(endRatio * len), len);
+                if(end <= start) end = start + 1;
+                
+                let sum = 0;
+                for(let j=start; j<end; j++) sum += dataArray[j];
+                targets[i] = sum / (end - start);
+            }
+            
+            let bass = 0, bassRange = Math.floor(len * 0.15);
+            for(let i=0; i<bassRange; i++) bass += dataArray[i];
+            let bassEnergy = bass / bassRange;
+            
+            for(let i=0; i<SLOTS; i++) {
+                targets[i] = Math.min(255, targets[i] * (1 + bassEnergy/200));
+            }
+        } else {
+            for(let i=0; i<SLOTS; i++) {
+                targets[i] = 20 + Math.sin(time*0.0015 + i*0.6)*15*LAYERS[i];
+            }
+        }
+        
+        for(let i=0; i<SLOTS; i++) {
+            heights[i] += (targets[i]-heights[i])*0.12;
+        }
+        
+        draw();
+        requestAnimationFrame(animate);
+    }
+
+    window.addEventListener('resize', () => {
+        W=canvas.width=window.innerWidth;
+        H=canvas.height=window.innerHeight;
+        init();
+    });
+    
+    window.onload = init;
+</script>
+</body>
+</html>
