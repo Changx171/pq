@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>音乐喷泉 · 炫彩版</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+        }
+        body {
+            width: 100vw;
+            height: 100vh;
+            background: #000;
+            overflow: hidden;
+            font-family: system-ui, -apple-system, sans-serif;
+            position: relative;
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .controls {
+            position: absolute;
+            bottom: 30px;
+            left: 0;
+            right: 0;
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            z-index: 20;
+            pointer-events: none;
+        }
+        button {
+            background: rgba(255,255,255,0.15);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: white;
+            padding: 12px 28px;
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+            pointer-events: auto;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+        button:hover {
+            background: rgba(255,255,255,0.25);
+            transform: translateY(-2px);
+        }
+        button:active {
+            transform: scale(0.95);
+        }
+        button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        #fileBtn {
+            background: rgba(255,140,0,0.8);
+            border-color: rgba(255,160,0,0.5);
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+<div class="controls">
+    <button id="fileBtn">🎵 选择音乐</button>
+    <button id="playBtn" disabled>▶ 播放</button>
+</div>
+<input type="file" id="fileInput" accept="audio/mp3,audio/wav,audio/m4a,audio/aac" style="display:none">
+
+<script>
+    // ================== 配置 ==================
+    const SLOTS = 10;
+    const MAX_HEIGHT = 280;
+    const LAYERS = [0.6, 0.7, 0.8, 0.9, 1.0, 0.5, 0.6, 0.7, 0.8, 0.9];
+    
+    const PARTICLE_POOL = 150;
+    const MIST_POOL = 80;
+
+    // ================== 全局变量 ==================
+    let isPlaying = false, musicFile = null;
+    let audioCtx, sourceNode, analyser, dataArray;
+    let canvas = document.getElementById('canvas');
+    let ctx = canvas.getContext('2d');
+    let W, H, time = 0;
+    
+    let stars = [], buildings = [];
+    let particles = [], mistParticles = [];
+    let heights = [], targets = [];
+    let bassEnergy = 0;
+    let globalHueShift = 0;
+
+    // ================== 初始化 ==================
+    function init() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+        
+        stars = [];
+        for(let i=0; i<200; i++) {
+            stars.push({
+                x: Math.random()*W, 
+                y: Math.random()*H*0.6,
+                size: Math.random()*1.5,
+                blink: Math.random()*Math.PI,
+                speed: 0.02+Math.random()*0.03,
+                hue: Math.random()*60 + 180
+            });
+        }
+        
+        buildings = [];
+        let x = 0;
+        while(x < W) {
+            let w = 20 + Math.random()*40;
+            buildings.push({x, w, h: 30 + Math.random()*80});
+            x += w + 5;
+        }
+        
+        for(let i=0; i<PARTICLE_POOL; i++) particles.push({x:0,y:0,vx:0,vy:0,life:0,active:false, hue:0});
+        for(let i=0; i<MIST_POOL; i++) mistParticles.push({x:0,y:0,vx:0,vy:0,life:0,size:0,active:false});
+        
+        heights = new Array(SLOTS).fill(0);
+        targets = new Array(SLOTS).fill(0);
+    }
+
+    // ================== 绘制 ==================
+    function draw() {
+        let grad = ctx.createLinearGradient(0,0,0,H);
+        grad.addColorStop(0, '#02040a');
+        grad.addColorStop(0.5, '#0a1428');
+        grad.addColorStop(1, '#0d1e3a');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0,0,W,H);
+        
+        stars.forEach(s => {
+            let alpha = 0.3 + Math.sin(time*s.speed + s.blink)*0.3;
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = `hsl(${s.hue + globalHueShift}, 80%, 80%)`;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, s.size, 0, Math.PI*2);
+            ctx.fill();
+        });
+        ctx.globalAlpha = 1;
+        
+        ctx.fillStyle = '#051020';
+        buildings.forEach(b => {
+            ctx.fillRect(b.x, H*0.65 - b.h, b.w, b.h);
+            if(Math.random() > 0.98) {
+                ctx.fillStyle = `hsl(${Math.random()*60 + 30}, 100%, 70%)`;
+                ctx.fillRect(b.x+5, H*0.65-b.h+10, 3, 3);
+                ctx.fillStyle = '#051020';
+            }
+        });
+        
+        let waterY = H*0.68;
+        ctx.fillStyle = 'rgba(0,20,50,0.8)';
+        ctx.fillRect(0, waterY, W, H-waterY);
+        
+        for(let i=0; i<5; i++) {
+            let y = waterY + Math.sin(time*0.002+i)*3;
+            ctx.fillStyle = `hsla(${180 + i*30 + globalHueShift}, 70%, 60%, 0.1)`;
+            ctx.fillRect(0, y, W, 1);
+        }
+        
+        drawFountainLayer(waterY, true);
+        drawFountainLayer(waterY, false);
+        
+        drawMist(waterY);
+        drawReflection(waterY);
+    }
+
+    function drawFountainLayer(waterY, isBack) {
+        let startIdx = isBack ? 5 : 0;
+        let endIdx = isBack ? 10 : 5;
+        let slotW = W / 6;
+        
+        for(let i=startIdx; i<endIdx; i++) {
+            let idx = isBack ? i-5 : i;
+            let centerX = slotW * (idx + 1) + (isBack ? slotW*0.5 : 0);
+            let layerMul = LAYERS[i];
+            let rawH = heights[i] * MAX_HEIGHT / 255 * layerMul;
+            let h = Math.min(MAX_HEIGHT * layerMul, rawH);
+            
+            if(h < 5) continue;
+            
+            let intensity = heights[i] / 255;
+            
+            let baseHue = (i * 36 + globalHueShift) % 360;
+            if(isBack) baseHue += 20;
+            
+            let heightOffset = intensity * 40;
+            let hue = (baseHue + heightOffset) % 360;
+            
+            let sat = 70 + intensity * 30;
+            let light = 40 + intensity * 40;
+            
+            let grad = ctx.createLinearGradient(centerX, waterY, centerX, waterY-h);
+            grad.addColorStop(0, `hsla(${hue},${sat}%,${light}%,0.9)`);
+            grad.addColorStop(0.4, `hsla(${hue + 20},${sat}%,${light+10}%,0.7)`);
+            grad.addColorStop(0.8, `hsla(${hue + 40},${sat-20}%,${light+30}%,0.4)`);
+            grad.addColorStop(1, `hsla(${hue + 60},${sat-40}%,${light+50}%,0.1)`);
+            
+            let baseW = isBack ? 6 : 8;
+            let topW = baseW * 0.3;
+            
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.moveTo(centerX-baseW, waterY);
+            ctx.lineTo(centerX+baseW, waterY);
+            ctx.lineTo(centerX+topW, waterY-h);
+            ctx.lineTo(centerX-topW, waterY-h);
+            ctx.closePath();
+            ctx.fill();
+            
+            ctx.fillStyle = `hsla(${hue},80%,95%,${0.4+intensity*0.4})`;
+            ctx.fillRect(centerX-baseW*0.3, waterY-h, baseW*0.6, h);
+            
+            let glow = ctx.createRadialGradient(centerX, waterY, 0, centerX, waterY, baseW*4);
+            glow.addColorStop(0, `hsla(${hue},90%,60%,${0.7*intensity})`);
+            glow.addColorStop(0.5, `hsla(${hue+30},80%,50%,${0.3*intensity})`);
+            glow.addColorStop(1, 'transparent');
+            ctx.fillStyle = glow;
+            ctx.fillRect(centerX-baseW*4, waterY-baseW*4, baseW*8, baseW*8);
+            
+            if(heights[i] > 120) {
+                drawSplash(centerX, waterY-h, hue, intensity);
+            }
+            
+            if(heights[i] > 80 && Math.random() < 0.15) {
+                spawnMist(centerX, waterY-h*0.7, hue);
+            }
+        }
+    }
+
+    function drawSplash(x, y, hue, intensity) {
+        ctx.fillStyle = `hsla(${hue + Math.random()*40},90%,85%,${intensity})`;
+        for(let i=0; i<10; i++) {
+            let angle = -Math.PI/2 + (i-4.5)*0.25;
+            let r = 4 + Math.random()*6;
+            let px = x + Math.cos(angle)*r;
+            let py = y + Math.sin(angle)*r*0.5;
+            ctx.beginPath();
+            ctx.arc(px, py, 1.5, 0, Math.PI*2);
+            ctx.fill();
+        }
+        ctx.fillStyle = `hsla(${hue},100%,95%,${intensity})`;
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI*2);
+        ctx.fill();
+    }
+
+    function spawnMist(x, y, hue) {
+        for(let p of mistParticles) {
+            if(!p.active) {
+                p.x = x + (Math.random()-0.5)*30;
+                p.y = y;
+                p.vx = (Math.random()-0.5)*0.8;
+                p.vy = -Math.random()*0.8;
+                p.life = 1;
+                p.size = 15 + Math.random()*25;
+                p.hue = hue + (Math.random()-0.5)*30;
+                p.active = true;
+                break;
+            }
+        }
+    }
+
+    function drawMist(waterY) {
+        ctx.globalCompositeOperation = 'screen';
+        for(let p of mistParticles) {
+            if(!p.active) continue;
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life -= 0.015;
+            p.size *= 1.015;
+            
+            if(p.life <= 0) {
+                p.active = false;
+                continue;
+            }
+            
+            ctx.fillStyle = `hsla(${p.hue},60%,80%,${p.life*0.12})`;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+            ctx.fill();
+        }
+        ctx.globalCompositeOperation = 'source-over';
+    }
+
+    function drawReflection(waterY) {
+        ctx.save();
+        ctx.globalAlpha = 0.25;
+        ctx.scale(1, -0.3);
+        ctx.translate(0, -waterY*3.3);
+        ctx.filter = 'blur(4px)';
+        
+        let slotW = W/6;
+        for(let i=0; i<SLOTS; i++) {
+            let isBack = i>=5;
+            let idx = isBack ? i-5 : i;
+            let centerX = slotW*(idx+1) + (isBack?slotW*0.5:0);
+            let h = heights[i]*MAX_HEIGHT/255*LAYERS[i];
+            if(h<5) continue;
+            
+            let baseHue = (i * 36 + globalHueShift) % 360;
+            let hue = baseHue + (heights[i]/255)*40;
+            
+            ctx.fillStyle = `hsla(${hue},70%,60%,0.4)`;
+            ctx.fillRect(centerX-4, waterY-h, 8, h);
+        }
+        ctx.filter = 'none';
+        ctx.restore();
+    }
+
+    // ================== 音频分析（修复版） ==================
+    function animate() {
+        time = Date.now();
+        globalHueShift += 0.2;
+        
+        if(isPlaying && analyser && dataArray) {
+            analyser.getByteFrequencyData(dataArray);
+            let len = dataArray.length;
+            if(len === 0) len = 1; // 防止除零
+            
+            // 修复：正确的频谱映射，中间对应低音，两边对应高音，且避免越界
+            // 对称索引映射：0↔9, 1↔8, 2↔7, 3↔6, 4↔5
+            for(let i=0; i<SLOTS; i++) {
+                let symmetricIdx = i < 5 ? i : 9-i; // 0,1,2,3,4,4,3,2,1,0
+                
+                let startRatio, endRatio;
+                
+                if(symmetricIdx === 0) { // 最外侧（最高音）
+                    startRatio = 0.50; endRatio = 0.90;
+                } else if(symmetricIdx === 1) {
+                    startRatio = 0.30; endRatio = 0.50;
+                } else if(symmetricIdx === 2) { // 中间（低音）
+                    startRatio = 0.10; endRatio = 0.30;
+                } else if(symmetricIdx === 3) {
+                    startRatio = 0.05; endRatio = 0.10;
+                } else if(symmetricIdx === 4) { // 正中心（最低音）
+                    startRatio = 0.00; endRatio = 0.05;
+                }
+                
+                let start = Math.floor(startRatio * len);
+                let end = Math.floor(endRatio * len);
+                
+                // 边界保护
+                if(start >= len) start = len-1;
+                if(end > len) end = len;
+                if(end <= start) end = start + 1;
+                
+                let sum = 0;
+                for(let j=start; j<end; j++) {
+                    sum += dataArray[j];
+                }
+                targets[i] = sum / (end - start);
+            }
+            
+            // 低音检测（整体能量）
+            let bass = 0;
+            let bassRange = Math.floor(len * 0.15);
+            for(let i=0; i<bassRange; i++) bass += dataArray[i];
+            bassEnergy = bass / bassRange;
+            
+            // 应用低音增强
+            for(let i=0; i<SLOTS; i++) {
+                targets[i] = Math.min(255, targets[i] * (1 + bassEnergy/200));
+            }
+        } else {
+            // 待机动画
+            for(let i=0; i<SLOTS; i++) {
+                targets[i] = 25 + Math.sin(time*0.0015 + i*0.6)*20*LAYERS[i];
+            }
+        }
+        
+        // 平滑过渡
+        for(let i=0; i<SLOTS; i++) {
+            heights[i] += (targets[i]-heights[i])*0.12;
+        }
+        
+        draw();
+        requestAnimationFrame(animate);
+    }
+
+    // ================== 控制 ==================
+    async function startPlay(file) {
+        if(!file) return;
+        try {
+            if(!audioCtx) audioCtx = new(window.AudioContext||window.webkitAudioContext)();
+            if(sourceNode) { 
+                try{sourceNode.stop();}catch(e){} 
+            }
+            if(audioCtx.state === 'suspended') await audioCtx.resume();
+            
+            // 每次都重新创建 analyser 以确保状态干净
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 512;
+            analyser.smoothingTimeConstant = 0.8;
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+            
+            let buffer = await file.arrayBuffer();
+            let audioBuffer = await audioCtx.decodeAudioData(buffer);
+            sourceNode = audioCtx.createBufferSource();
+            sourceNode.buffer = audioBuffer;
+            sourceNode.loop = true;
+            sourceNode.connect(analyser);
+            analyser.connect(audioCtx.destination);
+            sourceNode.start(0);
+            
+            isPlaying = true;
+            playBtn.textContent = '⏸ 暂停';
+        } catch(e) {
+            alert('播放失败: ' + e.message);
+            console.error(e);
+        }
+    }
+
+    function stopPlay() {
+        if(sourceNode) {
+            try{sourceNode.stop();}catch(e){}
+        }
+        isPlaying = false;
+        playBtn.textContent = '▶ 播放';
+        heights.fill(0);
+        targets.fill(0);
+    }
+
+    document.getElementById('fileBtn').onclick = () => document.getElementById('fileInput').click();
+    document.getElementById('fileInput').onchange = e => {
+        let f = e.target.files[0];
+        if(!f) return;
+        musicFile = f;
+        stopPlay();
+        playBtn.disabled = false;
+        playBtn.textContent = '▶ 播放';
+    };
+    document.getElementById('playBtn').onclick = () => {
+        if(!musicFile) return alert('请先选择音乐');
+        isPlaying ? stopPlay() : startPlay(musicFile);
+    };
+    window.onresize = init;
+    
+    init();
+    animate();
+</script>
+</body>
+</html>
