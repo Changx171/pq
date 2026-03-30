@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>音乐喷泉 · 流体水柱版</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            user-select: none;
+        }
+        body {
+            width: 100vw;
+            height: 100vh;
+            background: linear-gradient(to bottom, #010105, #0a0a2a);
+            overflow: hidden;
+            font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+            position: relative;
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .controls {
+            position: absolute;
+            bottom: 20px;
+            left: 0;
+            right: 0;
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            z-index: 20;
+            background: rgba(0,0,0,0.6);
+            backdrop-filter: blur(12px);
+            padding: 10px 20px;
+            border-radius: 50px;
+            width: fit-content;
+            margin: 0 auto;
+            pointer-events: auto;
+            -webkit-transform: translateZ(0);
+        }
+        button {
+            background: #2b85e4;
+            border: none;
+            color: white;
+            padding: 8px 20px;
+            border-radius: 40px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: 0.2s;
+            -webkit-tap-highlight-color: transparent;
+        }
+        button:active {
+            transform: scale(0.96);
+        }
+        button:disabled {
+            opacity: 0.5;
+        }
+        #fileBtn {
+            background: #ff8c00;
+        }
+        .info {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #ccc;
+            font-size: 12px;
+            background: rgba(0,0,0,0.4);
+            padding: 4px 12px;
+            border-radius: 20px;
+            pointer-events: none;
+            z-index: 20;
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+<div class="info">🎵 流体水柱效果 | 10柱音乐喷泉</div>
+<div class="controls">
+    <button id="fileBtn">🎵 选择音乐</button>
+    <button id="playBtn" disabled>▶ 播放</button>
+</div>
+<input type="file" id="fileInput" accept="audio/mp3,audio/wav,audio/m4a,audio/aac" style="display:none">
+
+<script>
+    // ================== 配置 ==================
+    const TOTAL_SLOTS = 10;
+    const ACTIVE_COUNT = 10;
+    const MAX_HEIGHT = 200;
+    const activeIndices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    
+    // 性能优化配置
+    const PARTICLE_POOL_SIZE = 60;  // 限制最大粒子数
+    const WAVE_SEGMENTS = 3;        // 水柱边缘分段数（少了流畅，多了吃性能）
+
+    // ================== 全局变量 ==================
+    let isPlaying = false;
+    let musicFile = null;
+    let audioCtx = null;
+    let sourceNode = null;
+    let analyser = null;
+    let dataArray = null;
+
+    const canvas = document.getElementById('canvas');
+    let ctx = canvas.getContext('2d');
+    let canvasWidth, canvasHeight;
+
+    let stars = [];
+    let buildings = [];
+    
+    // 粒子对象池
+    let particlePool = [];
+    let activeParticles = 0;
+
+    let jetHeights = new Array(ACTIVE_COUNT).fill(0);
+    let targetHeights = new Array(ACTIVE_COUNT).fill(0);  // 目标高度（物理缓冲）
+    let bassValue = 0;
+    let time = 0;
+
+    const SMOOTH = 0.2;  // 更平滑的物理
+
+    // ================== 初始化 ==================
+    function initScene() {
+        canvasWidth = window.innerWidth;
+        canvasHeight = window.innerHeight;
+        canvas.width = canvasWidth;
+        canvas.height = canvasHeight;
+        
+        // 移动端减少星星数量
+        const isMobile = canvasWidth < 768;
+        const starCount = isMobile ? 80 : 150;
+        
+        stars = [];
+        for (let i = 0; i < starCount; i++) {
+            stars.push({
+                x: Math.random() * canvasWidth,
+                y: Math.random() * canvasHeight * 0.6,
+                r: Math.random() * 1.5 + 0.5,
+                alpha: Math.random() * 0.5 + 0.2,
+                twinkle: Math.random() * Math.PI
+            });
+        }
+
+        buildings = [];
+        const buildingCount = Math.floor(canvasWidth / 50) + 5;
+        for (let i = 0; i < buildingCount; i++) {
+            buildings.push({
+                x: (i / buildingCount) * canvasWidth,
+                width: 10 + Math.random() * 15,
+                height: 15 + Math.random() * 50,
+                color: `rgba(30,40,80,${0.3 + Math.random()*0.3})`,
+            });
+        }
+
+        // 初始化粒子池
+        particlePool = [];
+        for (let i = 0; i < PARTICLE_POOL_SIZE; i++) {
+            particlePool.push({
+                x: 0, y: 0, vx: 0, vy: 0, life: 0, size: 0, active: false, color: ''
+            });
+        }
+    }
+
+    // ================== 绘制函数 ==================
+    function drawStars() {
+        ctx.fillStyle = 'white';
+        for (let s of stars) {
+            const twinkle = Math.sin(time * 0.002 + s.twinkle) * 0.2 + 0.8;
+            ctx.globalAlpha = s.alpha * twinkle;
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, s.r, 0, Math.PI*2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    function drawCity() {
+        const groundY = canvasHeight * 0.65;
+        for (let b of buildings) {
+            ctx.fillStyle = b.color;
+            ctx.fillRect(b.x, groundY - b.height, b.width, b.height);
+            ctx.fillStyle = "rgba(255,255,100,0.2)";
+            ctx.fillRect(b.x + 2, groundY - b.height + 3, b.width-4, 3);
+        }
+    }
+
+    function drawWater() {
+        const waterY = canvasHeight * 0.68;
+        ctx.fillStyle = "rgba(0,60,120,0.4)";
+        ctx.fillRect(0, waterY, canvasWidth, canvasHeight - waterY);
+        
+        // 简化的水面波纹（只画3条线）
+        ctx.strokeStyle = "rgba(80,180,255,0.2)";
+        ctx.lineWidth = 2;
+        for (let i=0; i<3; i++) {
+            ctx.beginPath();
+            const offset = Math.sin(time * 0.001 + i) * 3;
+            ctx.moveTo(0, waterY + offset);
+            ctx.lineTo(canvasWidth, waterY + Math.cos(time * 0.001 + i*0.5) * 3);
+            ctx.stroke();
+        }
+    }
+
+    // 绘制流体水柱（核心修改）
+    function drawFluidFountains() {
+        const waterY = canvasHeight * 0.68;
+        const slotWidth = canvasWidth / (TOTAL_SLOTS + 1);
+        const baseWidth = slotWidth * 0.45;
+        
+        for (let i = 0; i < ACTIVE_COUNT; i++) {
+            const height = Math.min(MAX_HEIGHT, jetHeights[i] * MAX_HEIGHT / 255);
+            if (height < 2) continue;  // 太矮不画
+            
+            const slotIndex = activeIndices[i];
+            const centerX = slotWidth * (slotIndex + 1);
+            const baseX = centerX - baseWidth / 2;
+            const topY = waterY - height;
+            
+            const hue = (time * 0.05 + i * 36) % 360;
+            
+            // 水柱宽度随高度变化（底部粗，顶部细，模拟水压）
+            const topWidth = baseWidth * (0.3 + 0.4 * (height / MAX_HEIGHT));
+            const midWidth = baseWidth * 0.8;
+            
+            // 波动参数（水纹效果）
+            const wave1 = Math.sin(time * 0.003 + i) * 3;
+            const wave2 = Math.cos(time * 0.004 + i * 0.5) * 2;
+            
+            ctx.beginPath();
+            
+            // 左边缘（带波浪）
+            ctx.moveTo(baseX, waterY);
+            
+            // 分段绘制左边（模拟流体不规则边缘）
+            for (let seg = 1; seg <= WAVE_SEGMENTS; seg++) {
+                const t = seg / WAVE_SEGMENTS;
+                const y = waterY - height * t;
+                const waveOffset = Math.sin(t * Math.PI * 2 + time * 0.005 + i) * (2 * t); // 顶部波动大
+                const x = baseX + (baseWidth - midWidth) * t * 0.5 + waveOffset;
+                ctx.lineTo(x, y);
+            }
+            
+            // 顶部（圆弧）
+            const topLeftX = centerX - topWidth/2 + wave1;
+            const topRightX = centerX + topWidth/2 + wave2;
+            ctx.quadraticCurveTo(
+                centerX + wave1, topY - 5,  // 控制点（顶部隆起）
+                topRightX, topY
+            );
+            
+            // 右边缘（反向分段）
+            for (let seg = WAVE_SEGMENTS - 1; seg >= 0; seg--) {
+                const t = seg / WAVE_SEGMENTS;
+                const y = waterY - height * t;
+                const waveOffset = Math.cos(t * Math.PI * 2 + time * 0.005 + i) * (2 * t);
+                const x = baseX + baseWidth - (baseWidth - midWidth) * t * 0.5 + waveOffset;
+                ctx.lineTo(x, y);
+            }
+            
+            ctx.closePath();
+            
+            // 填充（简化的渐变，避免重计算）
+            ctx.fillStyle = `hsla(${hue}, 85%, 55%, 0.85)`;
+            ctx.fill();
+            
+            // 高光（仅顶部）
+            if (height > 20) {
+                ctx.fillStyle = `hsla(${hue}, 90%, 75%, 0.6)`;
+                ctx.beginPath();
+                ctx.ellipse(centerX + wave1, topY + 3, topWidth*0.3, 4, 0, 0, Math.PI*2);
+                ctx.fill();
+            }
+        }
+    }
+
+    // 优化的粒子系统（使用对象池）
+    function updateParticles() {
+        const waterY = canvasHeight * 0.68;
+        const slotWidth = canvasWidth / (TOTAL_SLOTS + 1);
+        
+        // 生成新粒子（限制频率）
+        if (isPlaying && activeParticles < PARTICLE_POOL_SIZE) {
+            for (let i = 0; i < ACTIVE_COUNT; i++) {
+                const intensity = jetHeights[i] / 255;
+                // 只有强度够且随机命中才生成（减少数量）
+                if (intensity > 0.75 && Math.random() < 0.15) {
+                    // 找到空闲粒子
+                    for (let p of particlePool) {
+                        if (!p.active) {
+                            const slotIndex = activeIndices[i];
+                            p.x = slotWidth * (slotIndex + 1) + (Math.random() - 0.5) * 10;
+                            p.y = waterY - jetHeights[i] * MAX_HEIGHT / 255;
+                            p.vx = (Math.random() - 0.5) * 3;
+                            p.vy = -Math.random() * 4 - 2;
+                            p.life = 1.0;
+                            p.size = 2 + Math.random() * 3;
+                            p.color = `hsl(${(time * 0.1 + i * 36) % 360}, 80%, 60%)`;
+                            p.active = true;
+                            activeParticles++;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 更新和绘制
+        for (let p of particlePool) {
+            if (!p.active) continue;
+            
+            p.x += p.vx;
+            p.y += p.vy;
+            p.vy += 0.25;  // 重力
+            p.life -= 0.025;
+            
+            if (p.y > canvasHeight || p.life <= 0) {
+                p.active = false;
+                activeParticles--;
+                continue;
+            }
+            
+            ctx.globalAlpha = p.life;
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI*2);
+            ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    function draw() {
+        // 清屏（使用纯色填充而非clearRect，减少重绘闪烁）
+        ctx.fillStyle = '#010105';
+        ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+        
+        // 背景渐变（简化）
+        const grad = ctx.createLinearGradient(0, 0, 0, canvasHeight);
+        grad.addColorStop(0, "#010105");
+        grad.addColorStop(0.7, "#0a0a20");
+        grad.addColorStop(1, "#0d0d25");
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+        drawStars();
+        drawCity();
+        drawWater();
+        drawFluidFountains();
+        updateParticles();
+    }
+
+    // ================== 音频分析 ==================
+    function animate() {
+        time = Date.now();
+        
+        if (isPlaying && analyser && dataArray) {
+            analyser.getByteFrequencyData(dataArray);
+            const freqLen = dataArray.length;
+
+            // 频谱分配（1.3次方，0.7倍频谱）
+            for (let i = 0; i < ACTIVE_COUNT; i++) {
+                let tStart = Math.pow(i / ACTIVE_COUNT, 1.3);
+                let tEnd = Math.pow((i + 1) / ACTIVE_COUNT, 1.3);
+                
+                let start = Math.floor(tStart * freqLen * 0.7);
+                let end = Math.floor(tEnd * freqLen * 0.7);
+                
+                if (end <= start) end = start + 1;
+                if (end > freqLen) end = freqLen;
+                
+                let sum = 0;
+                for (let j = start; j < end; j++) {
+                    sum += dataArray[j];
+                }
+                targetHeights[i] = sum / (end - start);
+            }
+
+            // 低音增强
+            let bassSum = 0;
+            const bassEnd = Math.floor(freqLen * 0.1);
+            for (let i = 0; i < bassEnd; i++) bassSum += dataArray[i];
+            bassValue = bassSum / bassEnd;
+            
+            for (let i = 0; i < ACTIVE_COUNT; i++) {
+                targetHeights[i] = Math.min(255, targetHeights[i] * (1 + bassValue / 255));
+            }
+        } else {
+            // 待机微动
+            for (let i = 0; i < ACTIVE_COUNT; i++) {
+                targetHeights[i] = 20 + Math.sin(time * 0.001 + i * 0.5) * 15;
+            }
+        }
+
+        // 物理缓冲（让水柱运动更流体、有惯性）
+        for (let i = 0; i < ACTIVE_COUNT; i++) {
+            const diff = targetHeights[i] - jetHeights[i];
+            jetHeights[i] += diff * SMOOTH;
+        }
+
+        draw();
+        requestAnimationFrame(animate);
+    }
+
+    function onResize() {
+        initScene();
+    }
+
+    // ================== 音频控制 ==================
+    async function startPlayback(file) {
+        if (!file) return;
+        try {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (sourceNode) {
+                try { sourceNode.stop(); } catch(e) {}
+                sourceNode = null;
+            }
+            if (audioCtx.state === 'suspended') {
+                await audioCtx.resume();
+            }
+            if (!analyser) {
+                analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 256;
+                analyser.smoothingTimeConstant = 0.6;
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+            }
+            const arrayBuffer = await file.arrayBuffer();
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+            sourceNode = audioCtx.createBufferSource();
+            sourceNode.buffer = audioBuffer;
+            sourceNode.loop = true;
+            sourceNode.connect(analyser);
+            analyser.connect(audioCtx.destination);
+            sourceNode.start(0);
+            isPlaying = true;
+            playBtn.textContent = '⏸ 暂停';
+            playBtn.disabled = false;
+        } catch (err) {
+            alert('播放失败：' + err.message);
+            isPlaying = false;
+            playBtn.textContent = '▶ 播放';
+        }
+    }
+
+    function stopPlayback() {
+        if (sourceNode) {
+            try { sourceNode.stop(); } catch(e) {}
+            sourceNode = null;
+        }
+        if (audioCtx) {
+            audioCtx.suspend();
+        }
+        isPlaying = false;
+        playBtn.textContent = '▶ 播放';
+        for (let i=0; i<ACTIVE_COUNT; i++) {
+            targetHeights[i] = 0;
+            jetHeights[i] = 0;
+        }
+    }
+
+    // 事件绑定
+    const fileBtn = document.getElementById('fileBtn');
+    const playBtn = document.getElementById('playBtn');
+    const fileInput = document.getElementById('fileInput');
+
+    fileBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        musicFile = file;
+        if (isPlaying) stopPlayback();
+        playBtn.disabled = false;
+        playBtn.textContent = '▶ 播放';
+        fileBtn.textContent = `🎵 ${file.name.length > 12 ? file.name.slice(0,9)+'…' : file.name}`;
+    });
+
+    playBtn.addEventListener('click', async () => {
+        if (!musicFile) {
+            alert('请先选择音乐文件');
+            return;
+        }
+        if (isPlaying) {
+            stopPlayback();
+        } else {
+            await startPlayback(musicFile);
+        }
+    });
+
+    window.addEventListener('resize', onResize);
+    initScene();
+    animate();
+</script>
+</body>
+</html>
