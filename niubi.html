@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>音乐喷泉 - 诊断版</title>
+    <style>
+        body { margin:0; background:#000; color:#fff; font-family:system-ui; overflow:hidden; }
+        canvas { display:block; width:100vw; height:100vh; }
+        .debug {
+            position:fixed; top:10px; left:10px; background:rgba(0,0,0,0.8);
+            padding:10px; border-radius:8px; font-size:12px; max-width:80%;
+            border:1px solid #0f0; color:#0f0; z-index:100;
+        }
+        .error { color:#f00; border-color:#f00; }
+        button {
+            position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+            padding:10px 20px; background:#ff8c00; border:none; color:#fff;
+            border-radius:20px; cursor:pointer; z-index:100;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="debug" id="debug">等待播放...</div>
+    <button onclick="testGithubAudio()">🎵 测试 GitHub 音频</button>
+
+<script>
+    const debug = document.getElementById('debug');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    
+    let audioCtx, analyser, dataArray;
+    let isPlaying = false;
+
+    function log(msg, isError=false) {
+        debug.innerHTML += '<br>' + msg;
+        if(isError) debug.classList.add('error');
+        console.log(msg);
+    }
+
+    async function testGithubAudio() {
+        const url = 'https://changx171.github.io/pq/aiwozhonghua.mp3';
+        log('开始测试: ' + url);
+        
+        try {
+            // 1. 测试 fetch
+            log('1. 正在 fetch...');
+            const response = await fetch(url, { 
+                method: 'GET', 
+                mode: 'cors',
+                cache: 'no-cache'
+            });
+            
+            log('2. Fetch 状态: ' + response.status);
+            log('3. Content-Type: ' + response.headers.get('content-type'));
+            log('4. Content-Length: ' + response.headers.get('content-length'));
+            
+            if(!response.ok) {
+                throw new Error('HTTP ' + response.status);
+            }
+
+            // 2. 读取 buffer
+            log('5. 读取 ArrayBuffer...');
+            const arrayBuffer = await response.arrayBuffer();
+            log('6. Buffer 大小: ' + arrayBuffer.byteLength + ' bytes');
+            
+            if(arrayBuffer.byteLength < 1000) {
+                throw new Error('文件太小，可能不是音频文件');
+            }
+
+            // 3. 创建 AudioContext
+            if(!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            log('7. AudioContext 创建成功, 状态: ' + audioCtx.state);
+
+            // 4. 解码音频（最容易出错的步骤）
+            log('8. 正在解码音频...');
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+            log('9. ✅ 解码成功! 时长: ' + audioBuffer.duration.toFixed(2) + 's, 采样率: ' + audioBuffer.sampleRate);
+            
+            // 5. 播放
+            const source = audioCtx.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioCtx.destination);
+            source.start();
+            log('10. ✅ 开始播放!');
+            isPlaying = true;
+            
+            // 创建分析器用于喷泉效果
+            analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 256;
+            source.connect(analyser);
+            dataArray = new Uint8Array(analyser.frequencyBinCount);
+            
+            animate();
+
+        } catch(e) {
+            log('❌ 错误: ' + e.message, true);
+            console.error(e);
+            
+            // 详细错误分析
+            if(e.message.includes('decode')) {
+                log('提示: 音频解码失败。GitHub Pages 托管的 MP3 可能编码不兼容。', true);
+                log('尝试解决方案: 将 MP3 转换为 WAV 格式上传', true);
+            } else if(e.message.includes('Failed to fetch')) {
+                log('提示: 无法获取文件，可能是 CORS 被限制', true);
+            }
+        }
+    }
+
+// ==============================================
+// 👇 👇 👇 只改这里！纯视觉炸裂！无蜡烛、无LOW！
+// 坐标、节奏、逻辑、功能 100% 原版不动！
+// ==============================================
+function animate() {
+    if(!isPlaying) return;
+    
+    // 黑色半透明拖尾，更丝滑不闪烁
+    ctx.fillStyle = 'rgba(0,0,0,0.1)';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    if(analyser) {
+        analyser.getByteFrequencyData(dataArray);
+        const avg = dataArray.reduce((a,b)=>a+b,0)/dataArray.length;
+
+        for(let i=0; i<10; i++){
+            const h = (dataArray[i*2]/255) * 280;
+            const x = 100 + i*80;
+            const y = canvas.height - h - 50;
+            const w = 46;
+            const hue = i*36 + Date.now()*0.5;
+
+            // 双层霓虹渐变 + 外发光效果
+            ctx.shadowColor = `hsl(${hue},100%,70%)`;
+            ctx.shadowBlur = 30;
+
+            // 主体渐变光柱
+            const grd = ctx.createLinearGradient(0,y,0,y+h);
+            grd.addColorStop(0, `hsl(${hue},100%,80%)`);
+            grd.addColorStop(1, `hsl(${hue},100%,40%)`);
+            
+            ctx.fillStyle = grd;
+            ctx.fillRect(x,y,w,h);
+
+            // 顶部超强高亮条
+            ctx.fillStyle = `hsl(${hue},100%,100%)`;
+            ctx.fillRect(x,y,w,8);
+
+            ctx.shadowBlur = 0;
+        }
+
+        ctx.fillStyle = '#fff';
+        ctx.font = '24px sans-serif';
+        ctx.fillText('🎵 爱我中华 · 音乐喷泉',20,40);
+        ctx.fillStyle = '#0ff';
+        ctx.fillText('音量强度：'+Math.round(avg),20,75);
+    }
+    requestAnimationFrame(animate);
+}
+</script>
+</body>
+</html>
